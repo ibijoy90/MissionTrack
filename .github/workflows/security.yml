@@ -35,5 +35,7 @@ jobs:
           tar -xzf trivy_0.76.2_Linux-64bit.tar.gz
 
       - name: Trivy Scan
-        run: |
-          ./trivy config . --severity HIGH,CRITICAL --exit-code 1
+  run: |
+    ./trivy config k8s . \
+      --severity HIGH,CRITICAL \
+      --exit-code 1

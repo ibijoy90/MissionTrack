@@ -21,16 +21,18 @@ spec:
       serviceAccountName: backend-sa
 
       containers:
-      - name: nginx
+        - name: nginx
+          image: nginxinc/nginx-unprivileged
 
-        image: nginxinc/nginx-unprivileged
+          ports:
+            - containerPort: 8080
 
-        ports:
-        - containerPort: 8080
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
 
-        securityContext:
-          allowPrivilegeEscalation: false
-
-          capabilities:
-            drop:
-            - ALL
+            capabilities:
+              drop:
+                - ALL
