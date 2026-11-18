@@ -1,0 +1,18 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+
+metadata:
+  name: nginx-tls
+  namespace: missiontrack-tf
+
+spec:
+  secretName: nginx-tls-secret
+
+  issuerRef:
+    name: selfsigned-cluster-issuer
+    kind: ClusterIssuer
+
+  commonName: nginx-tf.local
+
+  dnsNames:
+  - nginx-tf.local

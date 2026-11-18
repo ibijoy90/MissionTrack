@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: keyvault-workload-test
+  namespace: missiontrack-dev
+  labels:
+    azure.workload.identity/use: "true"
+spec:
+  serviceAccountName: workload-identity-sa
+  automountServiceAccountToken: true
+
+  containers:
+    - name: keyvault-test
+      image: ghcr.io/azure/azure-workload-identity/msal-go
+      env:
+        - name: KEYVAULT_URL
+          value: "https://missiontrackkv001.vault.azure.net/"
+        - name: SECRET_NAME
+          value: "DbPassword"
+
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  restartPolicy: Never

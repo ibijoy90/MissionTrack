@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+
+metadata:
+  name: backend
+  namespace: missiontrack-dev
+  labels:
+    app: backend
+
+spec:
+  serviceAccountName: backend-sa
+
+  containers:
+  - name: nginx
+    image: nginx

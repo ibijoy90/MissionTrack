@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+
+metadata:
+  name: insecure-pod
+  namespace: missiontrack-dev
+
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+
+    securityContext:
+      privileged: true
