@@ -22,15 +22,17 @@ spec:
 
       containers:
       - name: nginx
-
         image: nginxinc/nginx-unprivileged
 
-        ports:
-        - containerPort: 8080
-
         securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
           allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
 
           capabilities:
             drop:
-            - ALL
+              - ALL
+
+        ports:
+        - containerPort: 8080
