@@ -1087,7 +1087,756 @@ Content-addressed immutable image identifier.
 
 # 15\. Final Closing Statement
 
-> MissionTrack gave me end-to-end experience rather than isolated theory. I provisioned and imported infrastructure with Terraform, implemented Kubernetes RBAC and dedicated identities, configured passwordless AKS-to-Key Vault access, exposed workloads through TLS-enabled Ingress, added autoscaling and monitoring, and integrated Trivy into GitHub Actions. I also resolved real issues involving Key Vault authorization, missing NetworkPolicy enforcement, incompatible container hardening, Terraform imports, Git large-file history, and restricted container builds. The project taught me to validate every security, reliability, and delivery control through testing rather than assuming a successful configuration means the intended outcome was achieved.
+> MissionTrack gave me end-to-end experience rather than isolated theory. I provisioned and imported infrastructure with Terraform, implemented Kubernetes RBAC and dedicated identities, configured passwordless AKS-to-Key Vault access, exposed workloads through TLS-enabled Ingress, added autoscaling and monitoring, and integrated Trivy into GitHub Actions. I also resolved real issues involving Key Vault authorization, missing NetworkPolicy enforcement, incompatible container hardening, Terraform imports, Git large-file history, and restricted container builds. The project taught me to validate every security, reliability, and delivery control through testing 
+rather than assuming a successful configuration means the intended outcome was achieved.
+
+MissionTrack Master Interview and Troubleshooting Guide
+About This Guide
+This master guide revisits the complete MissionTrack learning journey in the same order the project was built. It includes the interview questions that came up after each concept, practical answers, real examples from the project, troubleshooting steps, STAR stories, Kubernetes and container questions, rapid-fire questions with answers, and production improvements.
+Use this response pattern in interviews:
+What is the concept?
+Why is it needed?
+Where did you use it?
+How did you implement it?
+How did you validate it?
+What failed and how did you troubleshoot it?
+What would you change for production?
+> Do not claim MissionTrack processed real production or sensitive customer traffic. Describe it accurately as a production-style hands-on Azure DevSecOps and AKS project.
+---
+1. Complete Project Story
+30-Second Answer
+> I built MissionTrack as an Azure DevSecOps and Kubernetes security project. Terraform manages Azure and Kubernetes resources, AKS runs the workloads, Workload Identity provides passwordless Key Vault access, and GitHub Actions with Trivy enforces security checks. I also implemented RBAC, dedicated service accounts, NGINX Ingress, TLS, HPA, Azure Monitor, Log Analytics, and Container Insights.
+Two-Minute Answer
+> I built MissionTrack to practice end-to-end Azure DevSecOps and AKS platform engineering. I used Terraform to provision and manage a resource group, Azure Container Registry, Azure Key Vault, a user-assigned managed identity, Key Vault RBAC, firewall rules, and Kubernetes resources such as namespaces, service accounts, deployments, services, ingress, and HPA.
+>
+> For identity, I enabled the AKS OIDC issuer and Workload Identity. I created a federated identity credential that trusted a Kubernetes service account and granted the managed identity the Key Vault Secrets User role. I validated the complete flow by retrieving a Key Vault secret from a pod without storing an Azure client secret in Kubernetes.
+>
+> For Kubernetes security, I implemented namespace-scoped RBAC and tested it with `kubectl auth can-i`. I created dedicated service accounts for frontend, backend, and the Key Vault workload. I tested pod security controls such as non-root execution, dropped capabilities, no privilege escalation, and read-only filesystems. I also discovered that a NetworkPolicy resource was accepted but not enforced because the AKS cluster reported `networkPolicy: none`.
+>
+> For DevSecOps, I added Trivy to GitHub Actions. The pipeline intentionally failed when High or Critical findings existed. Trivy found an unrestricted Key Vault firewall and insecure Kubernetes defaults. I remediated the Key Vault finding by changing the ACL to default deny and allowing the AKS outbound IP. I also implemented NGINX Ingress, cert-manager TLS, health probes, resource requests and limits, HPA, metrics-server validation, Azure Monitor, Log Analytics, and Container Insights.
+Architecture
+```text
+Developer
+   |
+   v
+GitHub Repository
+   |
+   v
+GitHub Actions
+   |-- Terraform format check
+   |-- Terraform init without production backend
+   |-- Terraform validation
+   |-- Trivy configuration scan
+   |-- Container build on hosted runner (delivery target)
+   |-- Image scan and push to ACR (delivery target)
+   |-- AKS deployment and smoke test (delivery target)
+
+Internet Client
+   |
+   v
+Azure Load Balancer
+   |
+   v
+NGINX Ingress Controller
+   |
+   v
+TLS-enabled Ingress
+   |
+   v
+ClusterIP Service
+   |
+   v
+Kubernetes Deployment
+   |
+   v
+Application Pods
+
+Application Pod
+   |
+   v
+Kubernetes Service Account
+   |
+   v
+AKS OIDC Federation
+   |
+   v
+User-Assigned Managed Identity
+   |
+   v
+Azure Key Vault
+```
+---
+2. Phase-by-Phase Questions, Answers, and Real Examples
+Phase 1: Terraform and Azure Container Registry
+Q1. Why did you use Terraform?
+Answer:
+> Terraform made infrastructure repeatable, reviewable, and version controlled. It allowed me to validate syntax, preview changes, manage dependencies, detect drift, import existing resources, and use the same workflow in CI/CD.
+MissionTrack example:
+> I provisioned the resource group, ACR, Key Vault, managed identity, and role assignment with Terraform. After imports and configuration alignment, `terraform plan` returned no changes.
+Q2. Explain the Terraform workflow.
+```text
+terraform init
+ -> terraform fmt
+ -> terraform validate
+ -> terraform plan
+ -> review
+ -> terraform apply
+ -> verify in Azure
+```
+Q3. Why use ACR?
+Answer:
+> ACR provides an organization-controlled Azure container registry with Azure RBAC, networking options, and integration with AKS.
+Real example:
+> MissionTrack created `missiontrackacr001.azurecr.io` with admin access disabled, supporting identity-based authentication instead of registry admin credentials.
+Q4. Why disable ACR admin access?
+Answer:
+> The admin account uses broadly privileged static credentials. Managed identity and RBAC are safer, more auditable, and easier to scope.
+Q5. What issue could occur when AKS pulls from ACR?
+Answer:
+> `ImagePullBackOff` can occur if the image/tag does not exist, the kubelet identity lacks `AcrPull`, the registry URL is wrong, or the registry network rules block AKS.
+Troubleshooting:
+```powershell
+kubectl describe pod <pod> -n <namespace>
+az acr repository list --name missiontrackacr001 --output table
+az aks check-acr --resource-group aks-rg --name myaks --acr missiontrackacr001.azurecr.io
+```
+---
+Phase 2: Azure Key Vault and RBAC
+Q6. Why use Key Vault?
+Answer:
+> Key Vault centralizes secrets, keys, and certificates and provides RBAC, auditability, soft delete, rotation support, and managed identity integration.
+Q7. Why could you create the vault but not create a secret?
+Answer:
+> Azure separates control-plane permissions from data-plane permissions. I had permission to create the vault resource but initially lacked a Key Vault secrets role, so the operation returned `ForbiddenByRbac`.
+Q8. Authentication versus authorization?
+Answer:
+> Authentication establishes who the caller is. Authorization determines what the caller can do.
+MissionTrack example:
+> Azure authenticated my CLI identity successfully, but Key Vault blocked secret creation until I received a data-plane role.
+Q9. Why use Key Vault Secrets User for the workload?
+Answer:
+> It provides secret-read access without granting unnecessary vault administration, key management, or role assignment permissions.
+Q10. Why did Trivy report the Key Vault as Critical?
+Answer:
+> The network ACL default action was Allow. Trivy considered that unrestricted network exposure.
+Remediation:
+Retrieved the AKS effective outbound IP.
+Changed Key Vault ACL default action to Deny.
+Added the AKS outbound IP rule.
+Reviewed Terraform plan.
+Applied the change.
+Verified the live network ACL and reran Trivy.
+Q11. What would you do differently in production?
+Answer:
+> Prefer a private endpoint, private DNS, controlled egress, stricter RBAC, purge protection, diagnostics, and secret rotation.
+---
+Phase 3: Kubernetes RBAC
+Q12. What is Kubernetes RBAC?
+Answer:
+> RBAC authorizes actions using Roles, ClusterRoles, RoleBindings, and ClusterRoleBindings.
+Q13. Role versus RoleBinding?
+Answer:
+> A Role defines permissions in a namespace. A RoleBinding assigns those permissions to a user, group, or service account.
+Q14. How did you validate least privilege?
+Answer:
+> I created a read-only Role and bound it to `readonly-user`. I tested it using impersonation.
+```powershell
+kubectl auth can-i get pods `
+  --as=system:serviceaccount:missiontrack-dev:readonly-user `
+  -n missiontrack-dev
+```
+Validated results:
+Get pods: yes
+Delete deployments: no
+Get secrets: no
+Q15. Why use dedicated service accounts?
+Answer:
+> They isolate identity and permissions by workload. MissionTrack used separate service accounts for frontend, backend, read-only access, and Workload Identity.
+Q16. Why avoid the default service account?
+Answer:
+> Sharing one identity makes least privilege and auditing harder and increases blast radius.
+---
+Phase 4: NetworkPolicy Validation
+Q17. What is a NetworkPolicy?
+Answer:
+> It restricts pod ingress and egress traffic and supports microsegmentation and lateral-movement reduction.
+Q18. Why did the default-deny policy not block traffic?
+Answer:
+> The resource was successfully created, but AKS reported `networkPolicy: none`, meaning there was no enforcement engine.
+Q19. What is the lesson?
+Answer:
+> A created configuration does not prove the intended control is enforced. I tested connectivity before and after the policy and queried the AKS network profile.
+Q20. How would you implement it in production?
+Answer:
+> Enable a supported network-policy data plane when designing the cluster, implement default-deny safely, allow DNS and required service paths, and validate allowed and denied traffic.
+---
+Phase 5: Pod Security
+Q21. Why are privileged containers dangerous?
+Answer:
+> A privileged container receives extensive host-level capabilities and can significantly increase container-escape and node-compromise risk.
+Q22. Why run as non-root?
+Answer:
+> It reduces impact if the application is compromised and prevents unnecessary UID 0 access.
+Q23. Why did `runAsNonRoot` fail with the original NGINX image?
+Answer:
+> The image was configured to start as root. Kubernetes correctly blocked it because it violated the declared requirement.
+Q24. Why did `readOnlyRootFilesystem` break NGINX?
+Answer:
+> NGINX attempted to write `/tmp/proxy_temp` and generated configuration. The filesystem was read only.
+Q25. How would you solve that securely?
+Answer:
+> Use a compatible hardened image or mount writable `emptyDir` volumes only at required paths. In the lab, I retained other controls and documented the read-only filesystem compatibility issue.
+Q26. Why drop Linux capabilities?
+Answer:
+> It removes kernel-level privileges the workload does not need. Start with drop ALL and add back only explicitly required capabilities.
+Q27. What does `allowPrivilegeEscalation: false` do?
+Answer:
+> It prevents the container process from gaining more privileges than its parent process.
+Q28. Why use `seccompProfile: RuntimeDefault`?
+Answer:
+> It uses the runtime's default system-call filtering profile to reduce syscall attack surface.
+---
+Phase 6: Workload Identity and Key Vault Access
+Q29. Explain Workload Identity step by step.
+```text
+1. AKS exposes an OIDC issuer.
+2. A Kubernetes service account is annotated with a managed identity client ID.
+3. A federated credential trusts the issuer, subject, and audience.
+4. A labeled pod receives projected token configuration.
+5. The token is exchanged for an Entra access token.
+6. The managed identity accesses Key Vault through Azure RBAC.
+```
+Q30. What happens if the federated subject is wrong?
+Answer:
+> The token exchange fails because the service-account identity does not match the trusted subject.
+Q31. How did you prove the connection worked?
+Answer:
+> The Key Vault verification pod logged that the secret retrieval succeeded. I also inspected the service account, federated credential, role assignment, and projected token configuration.
+Q32. What security concern did the verification pod reveal?
+Answer:
+> It printed a synthetic secret to logs. That is acceptable only as a controlled lab demonstration. A production application must never log secret values. The secret should be rotated if exposed.
+---
+Phase 7: Terraform State and Import
+Q33. Why remote state?
+Answer:
+> Collaboration, locking, backup, centralized access control, and CI/CD support.
+Q34. Why did blob listing fail even though the storage account existed?
+Answer:
+> The user had management-plane permission but lacked a Blob Data role for data-plane access.
+Q35. What is Terraform import?
+Answer:
+> It associates an existing object with a Terraform address without recreating it.
+Q36. What did you import?
+Answer:
+> The user-assigned managed identity and Key Vault Secrets User role assignment.
+Q37. What proves a successful adoption?
+Answer:
+> A safe `terraform plan` showing no unintended changes. MissionTrack reached “No changes. Your infrastructure matches the configuration.”
+---
+Phase 8: Trivy Security Scanning
+Q38. What did Trivy scan?
+Answer:
+> Terraform, Kubernetes YAML, and Dockerfile configuration.
+Q39. What findings did it identify?
+Key Vault network ACL default allow
+Privileged container example
+Missing pod and container security contexts
+Missing read-only root filesystem
+Dockerfile without explicit non-root USER
+Q40. Why did GitHub Actions fail?
+Answer:
+> The Trivy command used `--exit-code 1`, so High and Critical findings intentionally failed the workflow.
+Q41. Is the failure a pipeline problem?
+Answer:
+> No. It demonstrated that the security gate worked.
+Q42. Why should insecure examples be separated?
+Answer:
+> Deliberately insecure training files can make a production gate fail forever. They should be excluded from the blocking scan or placed in a separate non-blocking educational job.
+Q43. Should every scanner recommendation be applied automatically?
+Answer:
+> No. Controls must be evaluated and tested for application compatibility. The NGINX read-only filesystem failure demonstrated this.
+---
+Phase 9: Deployments, Services, and Ingress
+Q44. Why replace standalone pods with Deployments?
+Answer:
+> Deployments provide replicas, self-healing, rolling updates, rollback, and declarative state.
+Q45. What is a ClusterIP Service?
+Answer:
+> An internal stable DNS and virtual IP that routes to matching pods.
+Q46. How did you validate service discovery?
+Answer:
+> I started a BusyBox test pod and used `wget` against the service DNS name. The NGINX page returned successfully.
+Q47. What does Ingress provide?
+Answer:
+> Host- and path-based HTTP/HTTPS routing from the ingress controller to internal services.
+Q48. Why was local hosts-file mapping discussed?
+Answer:
+> The ingress used a local hostname, so the Windows machine needed name resolution or an explicit Host header. Ping itself was not mandatory; HTTP validation was the meaningful test.
+---
+Phase 10: TLS and cert-manager
+Q49. What is cert-manager?
+Answer:
+> A Kubernetes controller that automates certificate requests, issuance, renewal, and TLS Secret creation.
+Q50. What did MissionTrack use?
+Answer:
+> A self-signed ClusterIssuer for learning, a Certificate resource, and an Ingress TLS reference to `nginx-tls-secret`.
+Q51. What would production use?
+Answer:
+> A trusted enterprise PKI or ACME issuer, real DNS, renewal monitoring, strong TLS policy, and controlled private-key access.
+---
+Phase 11: Resource Governance and HPA
+Q52. Why requests and limits?
+Answer:
+> Requests drive scheduling and CPU-based HPA calculations. Limits constrain resource usage.
+Q53. How does HPA work?
+Answer:
+> It compares current metrics with a configured target and adjusts replicas within minimum and maximum limits.
+Q54. Why did HPA show unknown CPU at first?
+Answer:
+> Metrics synchronization can take time, and CPU requests must exist. I verified metrics-server and used `kubectl top pods`.
+Q55. What if HPA is at maximum but latency remains high?
+Answer:
+> Investigate whether the bottleneck is CPU, memory, ingress, database, external dependency, or node capacity. HPA cannot solve every bottleneck.
+---
+Phase 12: Azure Monitor and Container Insights
+Q56. metrics-server versus Azure Monitor?
+Answer:
+> metrics-server provides current resource metrics for `kubectl top` and HPA. Azure Monitor provides centralized logs, inventory, history, dashboards, and alerts.
+Q57. How did you verify monitoring?
+Answer:
+> `kubectl top pods` and `kubectl top nodes` returned metrics, and `ama-logs` pods were running after Container Insights was enabled.
+Q58. What would you alert on?
+Node NotReady
+CrashLoopBackOff
+Unavailable replicas
+OOM kills
+High restarts
+Sustained CPU/memory saturation
+HPA at maximum
+Ingress 5xx and latency
+Certificate expiry
+Key Vault access failures
+---
+Phase 13: Git and GitHub
+Q59. Why did GitHub reject the first push?
+Answer:
+> A 238 MB Terraform provider executable existed in previous Git history. GitHub scans the full branch history, not only the current tree.
+Q60. How did you fix it?
+Answer:
+> I improved `.gitignore`, created a clean orphan branch, recommitted only safe current files, replaced the old branch, and pushed clean history.
+Q61. Why should provider binaries not be committed?
+Answer:
+> `terraform init` downloads them. They are platform-specific, large, and unnecessary in source control.
+---
+Phase 14: Application Build Without Local Docker
+Q62. Why was local Docker not used?
+Answer:
+> Corporate restrictions prevented Docker Desktop installation.
+Q63. Why did `az acr build` fail?
+Answer:
+> First, the Dockerfile was missing or saved as `Dockerfile.txt`. After that was fixed, the subscription returned `TasksOperationsNotAllowed` for ACR Tasks.
+Q64. What is the alternative?
+Answer:
+> Use a GitHub-hosted runner or another approved remote build runner. Docker runs in CI, not on the laptop.
+Q65. Is Docker required on AKS nodes?
+Answer:
+> No. AKS uses containerd. Docker can be used as an image build tool, but Kubernetes communicates through the Container Runtime Interface.
+---
+3. Kubernetes Troubleshooting Questions and Answers
+Q66. A pod is Pending. What do you do?
+```powershell
+kubectl describe pod <pod> -n <namespace>
+kubectl get events -n <namespace> --sort-by=.lastTimestamp
+kubectl top nodes
+```
+Possible causes: resources, taints, selectors, storage, quota, scheduling constraints.
+Q67. A pod is in CrashLoopBackOff. What do you do?
+```powershell
+kubectl logs <pod> -n <namespace>
+kubectl logs <pod> -n <namespace> --previous
+kubectl describe pod <pod> -n <namespace>
+```
+MissionTrack example: NGINX logs revealed `/tmp/proxy_temp` could not be created on a read-only filesystem.
+Q68. A pod is ImagePullBackOff. What do you check?
+Image name and tag
+ACR repository and tag existence
+`AcrPull` permission
+Registry firewall/private DNS
+Pod events
+Q69. Service exists but app is unreachable. What do you check?
+```powershell
+kubectl get svc,endpoints,pods -n <namespace> --show-labels
+kubectl describe svc <service> -n <namespace>
+```
+Likely causes: selector mismatch, wrong target port, pod not Ready, app listening elsewhere.
+Q70. Ingress returns 404. Why?
+Answer: Host/path mismatch, wrong ingress class, or request missing expected Host header.
+Q71. Ingress returns 502. Why?
+Answer: No healthy backend endpoints, wrong service port/target port, or backend application failure.
+Q72. Certificate is not Ready. What do you inspect?
+```powershell
+kubectl get certificate,certificaterequest,order,challenge -A
+kubectl describe certificate <name> -n <namespace>
+kubectl logs -n cert-manager deployment/cert-manager
+```
+Q73. Workload Identity fails. What do you check?
+Pod label
+Service account annotation
+Exact federated subject
+OIDC issuer
+Audience
+Client ID
+Azure role assignment
+Key Vault network path
+Q74. HPA is not scaling. What do you check?
+```powershell
+kubectl describe hpa <hpa> -n <namespace>
+kubectl top pods -n <namespace>
+kubectl get deployment metrics-server -n kube-system
+```
+Also verify container resource requests and actual CPU load.
+Q75. Deployment is 0/2 Available. What do you do?
+Get pod statuses.
+Describe one failed pod.
+Read current and previous logs.
+Review events.
+Check image, security context, volumes, probes, resources, and service account.
+Fix smallest safe issue.
+Watch rollout.
+---
+4. Docker and Container Troubleshooting
+Q76. Build says Dockerfile not found.
+Cause: wrong directory or `Dockerfile.txt`.
+```powershell
+dir
+Rename-Item Dockerfile.txt Dockerfile
+```
+Q77. Container permission denied after USER.
+Cause: non-root user cannot access copied files, directories, or required port.
+Fix: set ownership in the image, use nonprivileged ports, and verify writable paths.
+Q78. Container exits immediately.
+Cause: foreground process ended or CMD/ENTRYPOINT failed.
+Check: container logs, Dockerfile command, environment, config, and file permissions.
+Q79. Image is too large.
+Fix: multi-stage build, smaller base, package-cache cleanup, `.dockerignore`, fewer unnecessary files.
+Q80. Image still has vulnerabilities after rebuild.
+Cause: outdated base image, dependency lock, or stale cached layer.
+Fix: update dependencies and base digest, rebuild, and scan the exact image digest.
+Q81. Why avoid root containers?
+Answer: Root inside a container can increase impact if isolation is bypassed or host resources are exposed.
+Q82. Why use `.dockerignore`?
+Answer: It reduces build context size and prevents accidental inclusion of Git history, state, credentials, and local artifacts.
+```text
+.git
+.terraform
+*.tfstate
+.env
+```
+---
+5. CI/CD and DevSecOps Questions
+Q83. What did the first GitHub Actions pipeline do?
+Answer: Checkout, Terraform setup, format check, backend-disabled init, validation, Trivy installation, and blocking configuration scan.
+Q84. Why use `terraform init -backend=false` in CI validation?
+Answer: It initializes providers without requiring access to the production backend during a basic validation job.
+Q85. What should the complete pipeline do?
+```text
+Pull Request
+ -> format and lint
+ -> unit tests
+ -> SAST/SCA/secret scan
+ -> Terraform validate and plan
+ -> IaC scan
+ -> build image
+ -> image vulnerability scan
+ -> create SBOM and signature
+ -> push immutable image to ACR
+ -> deploy to dev
+ -> smoke test
+ -> approval
+ -> deploy to production
+ -> verify rollout
+ -> rollback if needed
+```
+Q86. How should GitHub authenticate to Azure?
+Answer: Use GitHub OIDC federation, scoped Azure RBAC, and protected environments instead of a long-lived client secret.
+Q87. Why use immutable tags?
+Answer: A Git SHA or digest identifies one exact artifact and supports auditability and reliable rollback.
+Q88. What should block deployment?
+Failed tests
+Exposed secrets
+Unapproved Critical vulnerabilities
+Invalid Terraform
+Failed policy checks
+Unsigned image where signing is required
+Deployment health failure
+Missing approval
+---
+6. Real-Life STAR Stories
+STAR 1: ForbiddenByRbac
+Situation: Key Vault existed, but secret creation failed.
+Task: Determine why the vault creator could not write a secret.
+Action: Distinguished Azure management access from data-plane access, identified the object ID, assigned a minimum required Key Vault role, waited for propagation, and retested.
+Result: Secret creation succeeded.
+STAR 2: NetworkPolicy not enforced
+Situation: Default-deny existed, but traffic remained allowed.
+Task: Validate enforcement.
+Action: Inspected policy selectors, tested traffic, and queried AKS networking.
+Result: Found `networkPolicy: none` and documented a cluster-design remediation.
+STAR 3: Security hardening caused outage
+Situation: New NGINX replicas failed after enabling a read-only root filesystem.
+Task: Restore availability while preserving security.
+Action: Read logs, found `/tmp/proxy_temp` write failure, retained non-root and privilege controls, and documented writable volume or compatible image options.
+Result: Deployment became 2/2 and later 3/3 healthy.
+STAR 4: Terraform import
+Situation: Identity and role assignment were manually created.
+Task: Bring them under IaC safely.
+Action: Defined resources, imported IDs, corrected configuration, and reviewed plans.
+Result: Terraform returned no changes.
+STAR 5: Trivy blocked GitHub Actions
+Situation: The pipeline failed after a push.
+Task: Determine if CI was broken.
+Action: Reviewed the failed Trivy step, hardened production manifests, added a non-root Docker USER, and separated insecure examples.
+Result: Proved the security gate was functioning as designed.
+STAR 6: GitHub large-file rejection
+Situation: GitHub rejected the Terraform provider binary from history.
+Task: publish clean source.
+Action: Added correct ignores, created an orphan branch, committed safe content, and replaced history.
+Result: GitHub repository synchronized successfully.
+STAR 7: No local image build
+Situation: Docker Desktop was blocked and ACR Tasks were not permitted.
+Task: preserve CI/CD design.
+Action: Selected GitHub-hosted runner builds with remote ACR push.
+Result: The delivery design remained feasible without changing corporate laptop policy.
+---
+7. Rapid-Fire Questions with Answers and Examples
+1. What is Workload Identity?
+Passwordless federation from a Kubernetes service account to an Azure managed identity.
+2. Why OIDC?
+It enables Entra to validate AKS-issued service account tokens.
+3. Federated subject format?
+`system:serviceaccount:<namespace>:<service-account>`.
+4. Which identity pulls from ACR?
+Usually the kubelet identity with `AcrPull`.
+5. Role versus ClusterRole?
+Role is namespace-scoped; ClusterRole can be cluster-wide or reusable.
+6. Why dedicated service accounts?
+Isolation, least privilege, auditability.
+7. Deployment versus StatefulSet?
+Stateless replicas versus stable identity/storage.
+8. Why ClusterIP for backend?
+Keep it internal.
+9. Wrong Service selector?
+No endpoints.
+10. Ingress 404?
+Host/path mismatch.
+11. Ingress 502?
+No healthy backend or wrong port.
+12. Readiness failure?
+Stops traffic to the pod.
+13. Liveness failure?
+Restarts the container.
+14. HPA metrics source?
+metrics-server.
+15. Why CPU requests for HPA?
+Utilization is relative to request.
+16. Terraform backend?
+State storage mechanism/location.
+17. Why lock file?
+Provider consistency.
+18. Why exclude state?
+Sensitive and environment-specific.
+19. Does import generate code?
+No.
+20. Drift detection?
+`terraform plan`.
+21. Key Vault data plane?
+Access to secrets, keys, certificates.
+22. Why Secrets User?
+Least privilege.
+23. Why NetworkPolicy failed?
+No enforcement engine.
+24. How enable it?
+Supported network-policy data plane and traffic validation.
+25. Trivy exit code 1?
+Fails the job on findings.
+26. Insecure examples?
+Separate from blocking scan.
+27. Docker USER?
+Avoid root execution.
+28. Immutable tag?
+Tag/digest tied to exact content.
+29. Image signing?
+Integrity and provenance.
+30. SBOM?
+Software component inventory.
+31. GitHub-to-Azure auth?
+OIDC federation.
+32. Protected environment?
+Approvals and scoped deployment access.
+33. Promotion?
+Move same immutable artifact through environments.
+34. Rollback?
+Deploy previous digest or rollout undo.
+35. Main alerts?
+Node, pod, rollout, HPA, ingress, certificate, Key Vault.
+36. Investigate memory?
+Top, limits, OOM events, application profiling.
+37. Secure AKS API?
+Private/restricted access, Entra, RBAC, disable local accounts.
+38. Why disable local accounts?
+Avoid unmanaged static admin credentials.
+39. Production Key Vault network?
+Private endpoint and private DNS.
+40. Biggest lesson?
+Validate outcomes, not just configuration creation.
+41. CrashLoopBackOff?
+Repeated failure and delayed restart.
+42. ImagePullBackOff?
+Image retrieval failure and retry backoff.
+43. OOMKilled?
+Container exceeded memory availability/limit.
+44. DaemonSet?
+One pod per selected node.
+45. ConfigMap?
+Non-secret configuration.
+46. Secret versus ConfigMap?
+Sensitive versus non-sensitive intent.
+47. PVC?
+Persistent storage request.
+48. Init container?
+Runs setup before app containers.
+49. Sidecar?
+Supporting container in same pod.
+50. Namespace?
+Logical scope for resources and policy.
+51. Taint?
+Repels pods without toleration.
+52. Affinity?
+Influences placement.
+53. PDB?
+Limits voluntary disruption.
+54. Rolling update?
+Gradual replica replacement.
+55. Canary?
+Small initial traffic release.
+56. Blue-green?
+Parallel old/new environments with traffic switch.
+57. containerd?
+CRI container runtime used by Kubernetes.
+58. CMD versus ENTRYPOINT?
+Executable versus defaults/arguments.
+59. `.dockerignore`?
+Reduces and secures build context.
+60. Image digest?
+Immutable content identifier.
+---
+8. Commands to Memorize
+Terraform
+```powershell
+terraform init
+terraform fmt -check
+terraform validate
+terraform plan
+terraform apply
+terraform state list
+terraform import <address> <resource-id>
+```
+AKS
+```powershell
+az aks get-credentials --resource-group aks-rg --name myaks --overwrite-existing
+kubectl config current-context
+kubectl get nodes
+```
+Troubleshooting
+```powershell
+kubectl get deployments,pods,svc,ingress,hpa -n missiontrack-tf
+kubectl describe pod <pod> -n <namespace>
+kubectl logs <pod> -n <namespace>
+kubectl logs <pod> -n <namespace> --previous
+kubectl get events -n <namespace> --sort-by=.lastTimestamp
+kubectl get endpoints -n <namespace>
+kubectl top pods -n <namespace>
+kubectl top nodes
+```
+Rollout
+```powershell
+kubectl rollout status deployment/<name> -n <namespace>
+kubectl rollout history deployment/<name> -n <namespace>
+kubectl rollout undo deployment/<name> -n <namespace>
+```
+RBAC
+```powershell
+kubectl auth can-i get pods -n missiontrack-dev
+kubectl auth can-i get secrets -n missiontrack-dev
+kubectl auth can-i --list -n missiontrack-dev
+```
+Azure Identity
+```powershell
+az aks show --resource-group aks-rg --name myaks --query oidcIssuerProfile
+az identity show --resource-group rg-missiontrack-dev --name missiontrack-identity
+az identity federated-credential list --resource-group rg-missiontrack-dev --identity-name missiontrack-identity
+az role assignment list --assignee-object-id <principal-id> --output table
+az keyvault show --name missiontrackkv001 --query properties.networkAcls
+```
+Security
+```powershell
+trivy config . --severity HIGH,CRITICAL
+trivy config k8s --severity HIGH,CRITICAL --exit-code 1
+```
+Git
+```powershell
+git status
+git add .
+git commit -m "message"
+git push
+git log --oneline -5
+git remote -v
+```
+---
+9. Production Improvements
+Separate dev, test, and prod environments
+Terraform modules and independent state
+Restricted/private AKS API
+Entra-integrated AKS and disabled local accounts
+Enforced NetworkPolicy
+Trusted DNS and certificates
+Private endpoints for Key Vault and ACR
+Azure Policy/admission enforcement
+Defender for Containers
+Image scanning, signing, SBOM, provenance
+GitHub OIDC to Azure
+Protected environments and approvals
+Immutable image tags/digests
+Backup and DR testing
+SLOs, alerts, dashboards, and runbooks
+Cost budgets and retention controls
+---
+10. Five-Day Study Plan
+Day 1: Project Story
+Practice 30-second and two-minute answers
+Draw architecture from memory
+Review all phase summaries
+Day 2: Terraform, Azure, and Identity
+State, backend, import, drift
+Key Vault RBAC/firewall
+Workload Identity flow
+Day 3: Kubernetes and Containers
+Pods, Deployments, Services, Ingress
+Probes, resources, HPA
+Kubernetes and Docker troubleshooting
+Day 4: Security and CI/CD
+Trivy remediation
+GitHub Actions security gate
+Build/scan/push/deploy design
+Rollback and approvals
+Day 5: Mock Interview
+Answer all rapid-fire questions
+Deliver all STAR stories
+Practice five outage scenarios
+Keep normal answers 60–120 seconds
+---
+Final Interview Closing Statement
+> MissionTrack gave me end-to-end experience instead of isolated theory. I provisioned and imported infrastructure with Terraform, implemented Kubernetes RBAC and dedicated identities, configured passwordless AKS-to-Key Vault access, exposed workloads through TLS-enabled Ingress, added autoscaling and monitoring, and integrated Trivy into GitHub Actions. I also resolved real issues involving Key Vault authorization, missing NetworkPolicy enforcement, incompatible container hardening, Terraform import and state, Git large-file history, and restricted container builds. The project taught me to validate every security, reliability, and delivery control through testing rather than assuming a successful configuration means the intended outcome was achieved.
 
 
 
